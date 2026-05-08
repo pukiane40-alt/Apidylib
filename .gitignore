@@ -44,6 +44,16 @@ Thumbs.db
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
 
+# DLL build output
+dll/build/
+dll/build-*/
+*.dll
+*.lib
+*.so
+*.dylib
+*.exp
+*.pdb
+
 # Replit
 .cache/
 .local/
