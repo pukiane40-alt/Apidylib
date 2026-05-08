@@ -1,136 +1,151 @@
 # XIT1299 License Protection DLL
 
-A license key protection library that connects to the @xit1299 API server.
-One key = one device only.
+Protect your Windows application with @xit1299 license keys.
+Each key works on **one device only** — bound permanently on first activation.
 
-## Files
+---
 
-| File | Description |
-|------|-------------|
-| `xit1299.h` | Public header — include this in your app |
-| `xit1299.cpp` | Implementation (compile into DLL/SO) |
-| `CMakeLists.txt` | CMake build system |
-| `test_main.cpp` | Example integration |
-
-## How it works
-
-1. Your app calls `XIT1299_Activate(api_url)` at startup
-2. A dialog appears asking the user to paste their license key (like the screenshot)
-3. The key is sent to the API (`POST /api/keys/validate`) with this device's hardware ID
-4. If the key has never been used, it binds to this device permanently
-5. If the key is already bound to a **different** device, it is rejected
-6. If valid, a success dialog appears showing time remaining
-
-## Build — Windows
-
-```bat
-mkdir build
-cd build
-cmake .. -G "Visual Studio 17 2022"
-cmake --build . --config Release
-```
-
-Or with MSVC directly:
-```bat
-cl /LD /EHsc /DXIT1299_EXPORTS xit1299.cpp ^
-   /link winhttp.lib crypt32.lib user32.lib advapi32.lib ^
-   /OUT:xit1299.dll
-```
-
-## Build — Linux (testing)
-
-```bash
-sudo apt install libcurl4-openssl-dev
-mkdir build && cd build
-cmake ..
-make
-```
-
-## Integration (C/C++)
+## Quick start
 
 ```cpp
 #include "xit1299.h"
 
 int main() {
-    // Show activation dialog + validate against API
-    int ok = XIT1299_Activate("https://yourapp.replit.app/api");
-    if (ok != XIT1299_SUCCESS) {
-        return 1; // exit — key invalid or user quit
-    }
+    if (XIT1299_Activate("https://yourapp.replit.app/api") != XIT1299_OK)
+        return 1;   // invalid key or user quit
     
-    // Your application continues here
-    run_my_app();
-    return 0;
+    // your app continues here
 }
 ```
 
-Link with:
-- **Windows**: `xit1299.lib` (import lib) or load dynamically with `LoadLibrary`
-- **Linux**: `libxit1299.so` via `-lxit1299`
+Link on Windows: `xit1299.lib`
+Link on Linux  : `-lxit1299 -lcurl`
 
-## API Endpoint
+---
 
-The DLL calls:
+## Build — Windows (recommended)
+
+Requires: Visual Studio 2019+ or Build Tools, CMake 3.14+
+
+```bat
+cd dll
+mkdir build
+cd build
+cmake .. -G "Visual Studio 17 2022" -A x64
+cmake --build . --config Release
+```
+
+Output:
+- `build\Release\xit1299.dll`  — copy next to your .exe
+- `build\Release\xit1299.lib`  — link at compile time
+- `build\Release\xit1299_test.exe` — test executable
+
+## Build — Linux (testing only)
+
+Requires: `g++`, `cmake`, `libcurl4-openssl-dev`
+
+```bash
+sudo apt install libcurl4-openssl-dev cmake
+cd dll
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+./xit1299_test https://yourapp.replit.app/api
+```
+
+---
+
+## How it works
+
+| Step | What happens |
+|------|-------------|
+| 1 | App calls `XIT1299_Activate(api_url)` at startup |
+| 2 | Dialog 1 appears — user pastes their license key |
+| 3 | DLL posts `{ key, deviceId }` to `POST /api/keys/validate` |
+| 4 | **First use** → server binds key to this device's hardware ID |
+| 5 | Key valid → Dialog 2 shows "@xit1299 VIP activated" + time |
+| 6 | User clicks **Enter App** → your app continues |
+| 7 | **Different device** → server rejects → user sees error |
+
+---
+
+## Dialog appearance
+
+**Dialog 1 — Activation:**
+```
+┌────────────────────────────────────────┐  ← dark bg
+│ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │  ← cyan stripe
+│  @xit1299                              │  ← cyan title
+│ ────────────────────────────────────── │
+│  Enter your @xit1299 key to continue.  │
+│                                        │
+│  LICENSE KEY                           │
+│ ┌──────────────────────────────────┐   │
+│ │ Paste license key                │   │  ← edit box
+│ └──────────────────────────────────┘   │
+│                                        │
+│  [     Activate     ] [     Quit     ] │
+└────────────────────────────────────────┘
+```
+
+**Dialog 2 — Success:**
+```
+┌────────────────────────────────────────┐
+│ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
+│          @xit1299                      │  ← cyan title (centred)
+│ ────────────────────────────────────── │
+│  ✔  @xit1299 VIP activated             │  ← green
+│  ⏳  23h 59m remaining                 │
+│                                        │
+│  🔒  Protected by @xit1299             │  ← grey
+│                                        │
+│          [    Enter App    ]           │
+└────────────────────────────────────────┘
+```
+
+---
+
+## API contract
 
 ```
 POST /api/keys/validate
 Content-Type: application/json
 
 {
-  "key": "XIT-XXXXXXXX-XXXXXXXX-XXXXXXXX",
-  "deviceId": "<hardware-id>"
+  "key":      "XIT-A1B2C3D4-E5F6A7B8-C9D0E1F2",
+  "deviceId": "WIN:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 }
 ```
 
 Response:
 ```json
 {
-  "valid": true,
-  "expiresAt": "2026-05-09T12:00:00Z",
-  "timeRemaining": "59m remaining",
-  "message": "@xit1299 VIP activated",
-  "deviceLocked": true
+  "valid":         true,
+  "expiresAt":     "2026-05-09T12:00:00Z",
+  "timeRemaining": "23h 59m remaining",
+  "message":       "@xit1299 VIP activated",
+  "deviceLocked":  true
 }
 ```
 
-## Dialog appearance
+---
 
-**Before activation** (matches screenshot 1):
-```
-┌─────────────────────────────────────┐
-│             @xit1299                │
-│  Enter your @xit1299 key to         │
-│  continue.                          │
-│                                     │
-│  [Paste license key............]    │
-│                                     │
-│      [Activate]    [Quit]           │
-└─────────────────────────────────────┘
-```
+## Device ID sources
 
-**After activation** (matches screenshot 2):
-```
-┌─────────────────────────────────────┐
-│             @xit1299                │
-│  [OK] @xit1299 VIP activated        │
-│  [*]  59m remaining                 │
-│                                     │
-│  [=] Protected by @xit1299          │
-│                                     │
-│           [Enter App]               │
-└─────────────────────────────────────┘
-```
+| Platform | Source |
+|----------|--------|
+| Windows  | `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` |
+| Linux    | `/etc/machine-id` |
+| Fallback | Hostname |
 
-## Key format
+---
 
-Keys generated by the web dashboard look like:
-```
-XIT-A1B2C3D4-E5F6A7B8-C9D0E1F2
-```
+## Files
 
-## Device binding
-
-- First use of a key: binds to the current device's hardware ID
-- Second use from same device: always accepted
-- Use from a **different** device: **rejected** with "Key is already activated on another device"
-- Admin can **revoke** a key in the web dashboard to free it (the user must get a new key)
+| File | Purpose |
+|------|---------|
+| `xit1299.h`      | Public header — include in your app |
+| `xit1299.cpp`    | Full implementation (dialogs + HTTP + device ID) |
+| `CMakeLists.txt` | CMake build for Windows and Linux |
+| `test_main.cpp`  | Example integration / smoke test |
+| `README.md`      | This file |

@@ -1,11 +1,12 @@
 /*
- * XIT1299 License Protection Library
- * Header file for integration
+ * xit1299.h — Public API for the XIT1299 License Protection Library
  *
- * Usage:
- *   1. Call XIT1299_Activate() at application startup
- *   2. If it returns XIT1299_SUCCESS, allow the app to continue
- *   3. If it returns XIT1299_FAIL, exit the application
+ * Include this header in your application, link against xit1299.lib (Windows)
+ * or libxit1299.so (Linux), then call XIT1299_Activate() at startup.
+ *
+ * Build:
+ *   Windows : cmake .. -G "Visual Studio 17 2022" && cmake --build . --config Release
+ *   Linux   : cmake .. && make
  */
 
 #ifndef XIT1299_H
@@ -17,8 +18,10 @@
   #else
     #define XIT1299_API __declspec(dllimport)
   #endif
+  #define XIT1299_CALL __cdecl
 #else
-  #define XIT1299_API __attribute__((visibility("default")))
+  #define XIT1299_API  __attribute__((visibility("default")))
+  #define XIT1299_CALL
 #endif
 
 #ifdef __cplusplus
@@ -26,42 +29,38 @@ extern "C" {
 #endif
 
 /* Return codes */
-#define XIT1299_SUCCESS  0
-#define XIT1299_FAIL     1
+#define XIT1299_OK    0   /* Key valid — allow app to run  */
+#define XIT1299_FAIL  1   /* Key invalid / user quit       */
 
 /*
  * XIT1299_Activate
  *
- * Shows the @xit1299 license activation dialog.
- * Validates the entered key against the API server.
- * Binds the key to this device (1 key = 1 device only).
+ * Show the @xit1299 activation dialog, validate the key against the API
+ * server, and bind the key to this device (1 key = 1 device only).
  *
  * Parameters:
- *   api_url  - The full base URL of your API server
- *              e.g. "https://yourapp.replit.app/api"
+ *   api_base_url — e.g. "https://yourapp.replit.app/api"
  *
- * Returns:
- *   XIT1299_SUCCESS (0) - Key is valid, app may continue
- *   XIT1299_FAIL    (1) - Key invalid/expired/stolen, exit app
+ * Returns XIT1299_OK on success, XIT1299_FAIL otherwise.
+ * Call at the very beginning of main()/WinMain().
  */
-XIT1299_API int XIT1299_Activate(const char* api_url);
+XIT1299_API int XIT1299_CALL XIT1299_Activate(const char* api_base_url);
 
 /*
- * XIT1299_ValidateKey
+ * XIT1299_ValidateSilent
  *
- * Validate a key directly without showing the dialog.
- * Useful for background re-validation.
+ * Validate a key without any UI (background re-check).
  *
  * Parameters:
- *   api_url   - API base URL
- *   key       - The license key string
- *   device_id - Hardware ID of this device (or NULL to auto-generate)
+ *   api_base_url — API base URL
+ *   key          — License key string (XIT-XXXXXXXX-XXXXXXXX-XXXXXXXX)
+ *   device_id    — Hardware ID (pass NULL to auto-detect)
  *
- * Returns:
- *   XIT1299_SUCCESS (0) - Key is valid
- *   XIT1299_FAIL    (1) - Key is invalid/expired/revoked/device mismatch
+ * Returns XIT1299_OK if valid, XIT1299_FAIL otherwise.
  */
-XIT1299_API int XIT1299_ValidateKey(const char* api_url, const char* key, const char* device_id);
+XIT1299_API int XIT1299_CALL XIT1299_ValidateSilent(const char* api_base_url,
+                                                     const char* key,
+                                                     const char* device_id);
 
 #ifdef __cplusplus
 }

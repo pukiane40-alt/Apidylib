@@ -1,468 +1,833 @@
 /*
- * XIT1299 License Protection Library
- * Implementation
+ * xit1299.cpp — XIT1299 License Protection Library
  *
- * Build on Windows:
- *   cl /LD /EHsc /DXIT1299_EXPORTS xit1299.cpp /link winhttp.lib user32.lib /OUT:xit1299.dll
+ * Windows: Custom Win32 dialogs (dark theme, @xit1299 branding)
+ * Linux  : Console fallback for testing
  *
- * Build on Linux (for testing):
- *   g++ -shared -fPIC -DXIT1299_EXPORTS -o libxit1299.so xit1299.cpp -lcurl
+ * Build on Windows (MSVC + CMake):
+ *   mkdir build && cd build
+ *   cmake .. -G "Visual Studio 17 2022"
+ *   cmake --build . --config Release
+ *   -> Release/xit1299.dll + Release/xit1299.lib
  *
- * Dependencies:
- *   Windows: WinHTTP (built-in), User32 (built-in)
- *   Linux:   libcurl (apt install libcurl4-openssl-dev)
+ * Build on Linux (GCC + CMake):
+ *   mkdir build && cd build
+ *   cmake ..
+ *   make
+ *   -> libxit1299.so
  */
 
 #include "xit1299.h"
 
+/* ═══════════════════════════════════════════════════════════════
+   Platform headers
+   ═══════════════════════════════════════════════════════════════ */
 #ifdef _WIN32
-  #define WIN32_LEAN_AND_MEAN
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
   #include <windows.h>
   #include <winhttp.h>
-  #include <wincrypt.h>
+  #include <commctrl.h>
   #pragma comment(lib, "winhttp.lib")
-  #pragma comment(lib, "crypt32.lib")
+  #pragma comment(lib, "comctl32.lib")
   #pragma comment(lib, "user32.lib")
+  #pragma comment(lib, "gdi32.lib")
+  #pragma comment(lib, "advapi32.lib")
 #else
   #include <curl/curl.h>
-  #include <unistd.h>
   #include <sys/utsname.h>
-  #include <stdio.h>
-  #include <string.h>
-  #include <stdint.h>
+  #include <unistd.h>
+  #include <termios.h>
 #endif
 
 #include <string>
-#include <sstream>
 #include <vector>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 
-/* ─────────────────────────────────────────────
-   Device ID generation
-   ───────────────────────────────────────────── */
-
-static std::string get_device_id() {
+/* ═══════════════════════════════════════════════════════════════
+   Colours & layout constants (dark command-center theme)
+   ═══════════════════════════════════════════════════════════════ */
 #ifdef _WIN32
-    /* Use machine GUID from registry */
-    HKEY hKey;
-    char guid[64] = {0};
-    DWORD size = sizeof(guid);
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-        "SOFTWARE\\Microsoft\\Cryptography", 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
-        RegQueryValueExA(hKey, "MachineGuid", NULL, NULL, (LPBYTE)guid, &size);
-        RegCloseKey(hKey);
-    }
-    if (strlen(guid) > 0) return std::string(guid);
-    /* Fallback: computer name */
-    char name[256] = {0};
-    DWORD nameLen = sizeof(name);
-    GetComputerNameA(name, &nameLen);
-    return std::string("WIN-") + name;
-#else
-    /* Linux: use /etc/machine-id */
-    FILE* f = fopen("/etc/machine-id", "r");
-    if (f) {
-        char id[64] = {0};
-        fread(id, 1, sizeof(id)-1, f);
-        fclose(f);
-        /* strip newline */
-        for (int i = 0; id[i]; i++) if (id[i] == '\n') { id[i] = 0; break; }
-        if (strlen(id) > 0) return std::string(id);
-    }
-    /* Fallback: hostname */
-    char hostname[256] = {0};
-    gethostname(hostname, sizeof(hostname));
-    return std::string("LNX-") + hostname;
+static const COLORREF COL_BG        = RGB(13, 13, 13);   /* near-black bg          */
+static const COLORREF COL_CARD      = RGB(22, 22, 22);   /* card surface           */
+static const COLORREF COL_ACCENT    = RGB(0, 200, 220);  /* cyan @xit1299 accent   */
+static const COLORREF COL_TEXT      = RGB(220, 220, 220);/* primary text           */
+static const COLORREF COL_SUBTEXT   = RGB(120, 120, 130);/* muted text             */
+static const COLORREF COL_BORDER    = RGB(40, 40, 50);   /* border                 */
+static const COLORREF COL_BTN_PRI   = RGB(0, 200, 220);  /* primary button fill    */
+static const COLORREF COL_BTN_SEC   = RGB(35, 35, 45);   /* secondary button fill  */
+static const COLORREF COL_INPUT_BG  = RGB(18, 18, 28);   /* input field background */
+static const COLORREF COL_SUCCESS   = RGB(0, 210, 130);  /* green success          */
 #endif
-}
 
-/* ─────────────────────────────────────────────
-   Simple JSON helpers
-   ───────────────────────────────────────────── */
-
+/* ═══════════════════════════════════════════════════════════════
+   JSON helpers (no external deps)
+   ═══════════════════════════════════════════════════════════════ */
 static std::string json_escape(const std::string& s) {
     std::string out;
+    out.reserve(s.size() + 8);
     for (char c : s) {
-        if (c == '"') out += "\\\"";
-        else if (c == '\\') out += "\\\\";
-        else out += c;
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            default:   out += c;
+        }
     }
     return out;
 }
 
-static std::string json_get_string(const std::string& json, const std::string& key) {
-    std::string search = "\"" + key + "\":\"";
-    size_t pos = json.find(search);
-    if (pos == std::string::npos) return "";
-    pos += search.size();
-    size_t end = json.find('"', pos);
-    if (end == std::string::npos) return "";
-    return json.substr(pos, end - pos);
+static std::string json_str(const std::string& json, const std::string& key) {
+    const std::string needle = "\"" + key + "\":\"";
+    size_t p = json.find(needle);
+    if (p == std::string::npos) return "";
+    p += needle.size();
+    size_t e = json.find('"', p);
+    return (e == std::string::npos) ? "" : json.substr(p, e - p);
 }
 
-static bool json_get_bool(const std::string& json, const std::string& key) {
-    std::string search = "\"" + key + "\":true";
-    return json.find(search) != std::string::npos;
+static bool json_bool(const std::string& json, const std::string& key) {
+    return json.find("\"" + key + "\":true") != std::string::npos;
 }
 
-/* ─────────────────────────────────────────────
-   HTTP POST
-   ───────────────────────────────────────────── */
-
-struct HttpResponse {
-    int status_code;
-    std::string body;
-    bool success;
-};
-
+/* ═══════════════════════════════════════════════════════════════
+   Device ID
+   ═══════════════════════════════════════════════════════════════ */
+static std::string get_device_id() {
 #ifdef _WIN32
-
-static HttpResponse http_post(const std::string& url, const std::string& body_json) {
-    HttpResponse result = {0, "", false};
-
-    /* Parse URL */
-    URL_COMPONENTSA uc = {0};
-    uc.dwStructSize      = sizeof(uc);
-    char host[256]       = {0};
-    char path[1024]      = {0};
-    uc.lpszHostName      = host;
-    uc.dwHostNameLength  = sizeof(host);
-    uc.lpszUrlPath       = path;
-    uc.dwUrlPathLength   = sizeof(path);
-
-    if (!WinHttpCrackUrl(std::wstring(url.begin(), url.end()).c_str(), 0, 0, NULL)) {
-        /* Try with wide string properly */
-        int len = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, NULL, 0);
-        std::vector<wchar_t> wurl(len);
-        MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, wurl.data(), len);
-
-        URL_COMPONENTSW ucw = {0};
-        ucw.dwStructSize = sizeof(ucw);
-        wchar_t whost[256] = {0};
-        wchar_t wpath[1024] = {0};
-        ucw.lpszHostName = whost;
-        ucw.dwHostNameLength = 256;
-        ucw.lpszUrlPath = wpath;
-        ucw.dwUrlPathLength = 1024;
-
-        if (!WinHttpCrackUrl(wurl.data(), 0, 0, &ucw)) return result;
-
-        HINTERNET hSession = WinHttpOpen(L"XIT1299/1.0",
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
-            WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!hSession) return result;
-
-        HINTERNET hConnect = WinHttpConnect(hSession, whost, ucw.nPort, 0);
-        if (!hConnect) { WinHttpCloseHandle(hSession); return result; }
-
-        DWORD flags = (ucw.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
-        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", wpath,
-            NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
-        if (!hRequest) {
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            return result;
-        }
-
-        WinHttpAddRequestHeaders(hRequest,
-            L"Content-Type: application/json\r\n", -1L,
-            WINHTTP_ADDREQ_FLAG_ADD);
-
-        if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-            (LPVOID)body_json.c_str(), (DWORD)body_json.size(),
-            (DWORD)body_json.size(), 0)) {
-            if (WinHttpReceiveResponse(hRequest, NULL)) {
-                DWORD status = 0;
-                DWORD statusSize = sizeof(status);
-                WinHttpQueryHeaders(hRequest,
-                    WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                    NULL, &status, &statusSize, NULL);
-                result.status_code = (int)status;
-
-                DWORD available = 0;
-                while (WinHttpQueryDataAvailable(hRequest, &available) && available > 0) {
-                    std::vector<char> buf(available + 1, 0);
-                    DWORD read = 0;
-                    WinHttpReadData(hRequest, buf.data(), available, &read);
-                    result.body += std::string(buf.data(), read);
-                }
-                result.success = true;
-            }
-        }
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return result;
+    /* Read MachineGuid from registry (unique per Windows install) */
+    HKEY hk;
+    LONG r = RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+        "SOFTWARE\\Microsoft\\Cryptography", 0,
+        KEY_READ | KEY_WOW64_64KEY, &hk);
+    if (r == ERROR_SUCCESS) {
+        char buf[64] = {0};
+        DWORD sz = sizeof(buf);
+        RegQueryValueExA(hk, "MachineGuid", NULL, NULL, (LPBYTE)buf, &sz);
+        RegCloseKey(hk);
+        if (buf[0]) return std::string("WIN:") + buf;
     }
-    return result;
-}
-
+    /* Fallback: computer name */
+    char name[256] = {0};
+    DWORD len = sizeof(name);
+    GetComputerNameA(name, &len);
+    return std::string("WIN-NAME:") + name;
 #else
-
-struct CurlBuffer {
-    std::string data;
-};
-
-static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    CurlBuffer* buf = (CurlBuffer*)userdata;
-    buf->data.append(ptr, size * nmemb);
-    return size * nmemb;
-}
-
-static HttpResponse http_post(const std::string& url, const std::string& body_json) {
-    HttpResponse result = {0, "", false};
-    CURL* curl = curl_easy_init();
-    if (!curl) return result;
-
-    CurlBuffer buf;
-    struct curl_slist* headers = NULL;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_json.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body_json.size());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-
-    CURLcode res = curl_easy_perform(curl);
-    if (res == CURLE_OK) {
-        long status = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-        result.status_code = (int)status;
-        result.body = buf.data;
-        result.success = true;
+    /* Linux: /etc/machine-id */
+    FILE* f = fopen("/etc/machine-id", "r");
+    if (f) {
+        char id[64] = {0};
+        if (fgets(id, sizeof(id), f)) {
+            fclose(f);
+            /* strip newline */
+            for (char* p = id; *p; p++) if (*p == '\n') { *p = 0; break; }
+            if (id[0]) return std::string("LNX:") + id;
+        } else { fclose(f); }
     }
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-    return result;
+    char host[256] = {0};
+    gethostname(host, sizeof(host));
+    return std::string("LNX-HOST:") + host;
+#endif
 }
 
-#endif
-
-/* ─────────────────────────────────────────────
-   Dialog (Windows) / Console (Linux)
-   ───────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════
+   HTTP POST
+   ═══════════════════════════════════════════════════════════════ */
+struct HttpResult {
+    bool    ok;
+    int     status;
+    std::string body;
+};
 
 #ifdef _WIN32
 
-/* Custom dialog: ask for key */
-static std::string show_key_input_dialog() {
-    /* Use InputBox-style approach with a custom dialog proc */
-    /* For simplicity, use a series of MessageBox + a common dialog approach */
+/* Convert narrow to wide string */
+static std::wstring to_wide(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, NULL, 0);
+    std::vector<wchar_t> buf(n);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, buf.data(), n);
+    return std::wstring(buf.data());
+}
 
-    /* We'll use a simple GetSaveFileName trick to get text input, 
-       but the cleanest approach is a custom DialogBox. 
-       Since we can't embed a resource here, use a CreateWindowEx approach. */
+static HttpResult http_post(const std::string& url, const std::string& body) {
+    HttpResult res = {false, 0, ""};
 
-    /* Create a simple window for key input */
-    const char* CLASS_NAME = "XIT1299_InputDlg";
+    std::wstring wurl = to_wide(url);
 
-    WNDCLASSEXA wc = {0};
-    wc.cbSize        = sizeof(wc);
-    wc.lpfnWndProc   = DefWindowProcA;
-    wc.hInstance     = GetModuleHandleA(NULL);
-    wc.lpszClassName = CLASS_NAME;
-    wc.hbrBackground = CreateSolidBrush(RGB(30, 30, 30));
-    RegisterClassExA(&wc);
+    URL_COMPONENTSW uc = {};
+    uc.dwStructSize = sizeof(uc);
+    wchar_t whost[256] = {};
+    wchar_t wpath[1024] = {};
+    uc.lpszHostName     = whost; uc.dwHostNameLength  = 256;
+    uc.lpszUrlPath      = wpath; uc.dwUrlPathLength   = 1024;
 
-    /* Instead of full custom dialog, use the simplest portable approach:
-       An input dialog via VBScript/PowerShell invocation */
-    char result_buf[256] = {0};
+    if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) return res;
 
-    /* Use PowerShell to show an input dialog */
-    const char* ps_cmd =
-        "powershell -Command \""
-        "$key = [Microsoft.VisualBasic.Interaction]::InputBox("
-        "'Enter your @xit1299 key to continue.', '@xit1299', '');"
-        "[System.IO.File]::WriteAllText($env:TEMP + '\\xit_key.tmp', $key)"
-        "\"";
+    HINTERNET hSess = WinHttpOpen(L"xit1299/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSess) return res;
 
-    STARTUPINFOA si = {0};
-    PROCESS_INFORMATION pi = {0};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
+    HINTERNET hConn = WinHttpConnect(hSess, whost, uc.nPort, 0);
+    if (!hConn) { WinHttpCloseHandle(hSess); return res; }
 
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "%s", ps_cmd);
+    DWORD flags = (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hReq = WinHttpOpenRequest(hConn, L"POST", wpath,
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!hReq) { WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSess); return res; }
 
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        /* Fallback: simple message box loop */
-        MessageBoxA(NULL,
-            "Could not show input dialog.\nPlease check your PowerShell installation.",
-            "@xit1299", MB_OK | MB_ICONERROR);
-        return "";
+    WinHttpAddRequestHeaders(hReq,
+        L"Content-Type: application/json\r\n", (DWORD)-1,
+        WINHTTP_ADDREQ_FLAG_ADD);
+
+    BOOL sent = WinHttpSendRequest(hReq,
+        WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        (LPVOID)body.c_str(), (DWORD)body.size(),
+        (DWORD)body.size(), 0);
+
+    if (sent && WinHttpReceiveResponse(hReq, NULL)) {
+        DWORD status = 0; DWORD sz = sizeof(status);
+        WinHttpQueryHeaders(hReq,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            NULL, &status, &sz, NULL);
+        res.status = (int)status;
+
+        DWORD avail = 0;
+        while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
+            std::vector<char> buf(avail + 1, 0);
+            DWORD rd = 0;
+            WinHttpReadData(hReq, buf.data(), avail, &rd);
+            res.body.append(buf.data(), rd);
+        }
+        res.ok = true;
     }
-    WaitForSingleObject(pi.hProcess, 30000);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
 
-    /* Read the temp file */
-    char tmp_path[MAX_PATH];
-    GetTempPathA(MAX_PATH, tmp_path);
-    std::string file_path = std::string(tmp_path) + "xit_key.tmp";
+    WinHttpCloseHandle(hReq);
+    WinHttpCloseHandle(hConn);
+    WinHttpCloseHandle(hSess);
+    return res;
+}
 
-    FILE* f = fopen(file_path.c_str(), "r");
-    if (f) {
-        fgets(result_buf, sizeof(result_buf), f);
-        fclose(f);
-        DeleteFileA(file_path.c_str());
-        /* Trim whitespace */
-        int len = strlen(result_buf);
-        while (len > 0 && (result_buf[len-1] == '\n' || result_buf[len-1] == '\r' || result_buf[len-1] == ' '))
-            result_buf[--len] = 0;
+#else /* Linux — libcurl */
+
+struct CurlBuf { std::string data; };
+static size_t curl_cb(char* p, size_t sz, size_t n, void* u) {
+    ((CurlBuf*)u)->data.append(p, sz * n);
+    return sz * n;
+}
+
+static HttpResult http_post(const std::string& url, const std::string& body) {
+    HttpResult res = {false, 0, ""};
+    CURL* c = curl_easy_init();
+    if (!c) return res;
+
+    CurlBuf buf;
+    curl_slist* hdrs = curl_slist_append(NULL, "Content-Type: application/json");
+    curl_easy_setopt(c, CURLOPT_URL,            url.c_str());
+    curl_easy_setopt(c, CURLOPT_POST,           1L);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS,     body.c_str());
+    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE,  (long)body.size());
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER,     hdrs);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION,  curl_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA,      &buf);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT,        10L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L);
+
+    if (curl_easy_perform(c) == CURLE_OK) {
+        long st = 0;
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &st);
+        res.status = (int)st;
+        res.body   = buf.data;
+        res.ok     = true;
     }
-    return std::string(result_buf);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(c);
+    return res;
+}
+#endif /* HTTP */
+
+/* ═══════════════════════════════════════════════════════════════
+   Core validate call
+   ═══════════════════════════════════════════════════════════════ */
+struct ValidateResult {
+    bool        valid;
+    bool        device_locked;
+    std::string message;
+    std::string time_remaining;
+};
+
+static ValidateResult call_validate(const std::string& api_base,
+                                    const std::string& key,
+                                    const std::string& device_id) {
+    ValidateResult r = {false, false, "Cannot reach @xit1299 server.", ""};
+
+    std::string base = api_base;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    std::string url = base + "/keys/validate";
+
+    std::string body = "{\"key\":\"" + json_escape(key) +
+                       "\",\"deviceId\":\"" + json_escape(device_id) + "\"}";
+
+    HttpResult hr = http_post(url, body);
+    if (!hr.ok || hr.status != 200) {
+        if (hr.status == 0)
+            r.message = "Cannot connect to @xit1299 server. Check your internet.";
+        else
+            r.message = "Server error (HTTP " + std::to_string(hr.status) + ")";
+        return r;
+    }
+
+    r.valid          = json_bool(hr.body, "valid");
+    r.device_locked  = json_bool(hr.body, "deviceLocked");
+    r.message        = json_str(hr.body,  "message");
+    r.time_remaining = json_str(hr.body,  "timeRemaining");
+    return r;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   WIN32 — Custom dialogs
+   ═══════════════════════════════════════════════════════════════ */
+#ifdef _WIN32
+
+/* ── Shared GDI resources ── */
+static HFONT g_fntTitle   = NULL;
+static HFONT g_fntBody    = NULL;
+static HFONT g_fntMono    = NULL;
+static HBRUSH g_brBg      = NULL;
+static HBRUSH g_brCard    = NULL;
+static HBRUSH g_brInput   = NULL;
+static HBRUSH g_brBtnPri  = NULL;
+static HBRUSH g_brBtnSec  = NULL;
+
+static void init_resources() {
+    if (g_fntTitle) return;
+    g_fntTitle  = CreateFontA(22, 0, 0, 0, FW_BOLD,   FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                               CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                               DEFAULT_PITCH, "Segoe UI");
+    g_fntBody   = CreateFontA(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                               CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                               DEFAULT_PITCH, "Segoe UI");
+    g_fntMono   = CreateFontA(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                               CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                               DEFAULT_PITCH, "Consolas");
+    g_brBg      = CreateSolidBrush(COL_BG);
+    g_brCard    = CreateSolidBrush(COL_CARD);
+    g_brInput   = CreateSolidBrush(COL_INPUT_BG);
+    g_brBtnPri  = CreateSolidBrush(COL_BTN_PRI);
+    g_brBtnSec  = CreateSolidBrush(COL_BTN_SEC);
+}
+
+/* Draw rounded rectangle helper */
+static void fill_rounded(HDC hdc, RECT r, int radius, COLORREF col) {
+    HBRUSH br = CreateSolidBrush(col);
+    HPEN   pn = CreatePen(PS_NULL, 0, col);
+    HBRUSH ob = (HBRUSH)SelectObject(hdc, br);
+    HPEN   op = (HPEN)SelectObject(hdc, pn);
+    RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(br);
+    DeleteObject(pn);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   DIALOG 1 — Activation (Photo 1)
+   ───────────────────────────────────────────────────────────── */
+#define DLG1_W  420
+#define DLG1_H  310
+
+#define ID_EDIT_KEY   101
+#define ID_BTN_ACT    102
+#define ID_BTN_QUIT   103
+#define ID_LBL_ERR    104
+
+struct DLG1_STATE {
+    std::string result_key;   /* output: key entered by user */
+    bool        activated;    /* true if user clicked Activate */
+    char        err_msg[256]; /* error text shown under input  */
+    HWND        hEdit;
+    HWND        hBtnAct;
+    HWND        hBtnQuit;
+    HWND        hLblErr;
+};
+
+static LRESULT CALLBACK Dlg1WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    DLG1_STATE* st = (DLG1_STATE*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+    case WM_CREATE: {
+        init_resources();
+        DLG1_STATE* s = (DLG1_STATE*)((CREATESTRUCTA*)lp)->lpCreateParams;
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR)s);
+
+        /* ---- Edit box ---- */
+        s->hEdit = CreateWindowExA(0, "EDIT", "",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            30, 155, 360, 34, hwnd, (HMENU)ID_EDIT_KEY,
+            GetModuleHandleA(NULL), NULL);
+        SendMessageA(s->hEdit, EM_SETLIMITTEXT, 50, 0);
+        SendMessageA(s->hEdit, WM_SETFONT, (WPARAM)g_fntMono, TRUE);
+
+        /* placeholder — "Paste license key" */
+        SetWindowTextA(s->hEdit, "Paste license key");
+
+        /* ---- Error label ---- */
+        s->hLblErr = CreateWindowExA(0, "STATIC", "",
+            WS_CHILD | WS_VISIBLE | SS_CENTER,
+            30, 194, 360, 18, hwnd, (HMENU)ID_LBL_ERR,
+            GetModuleHandleA(NULL), NULL);
+        SendMessageA(s->hLblErr, WM_SETFONT, (WPARAM)g_fntBody, TRUE);
+
+        /* ---- Buttons ---- */
+        s->hBtnAct = CreateWindowExA(0, "BUTTON", "Activate",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
+            30, 228, 170, 38, hwnd, (HMENU)ID_BTN_ACT,
+            GetModuleHandleA(NULL), NULL);
+        SendMessageA(s->hBtnAct, WM_SETFONT, (WPARAM)g_fntBody, TRUE);
+
+        s->hBtnQuit = CreateWindowExA(0, "BUTTON", "Quit",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
+            220, 228, 170, 38, hwnd, (HMENU)ID_BTN_QUIT,
+            GetModuleHandleA(NULL), NULL);
+        SendMessageA(s->hBtnQuit, WM_SETFONT, (WPARAM)g_fntBody, TRUE);
+
+        return 0;
+    }
+
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+
+        RECT rc; GetClientRect(hwnd, &rc);
+
+        /* Background */
+        FillRect(hdc, &rc, g_brBg);
+
+        /* Header accent stripe */
+        RECT hdr = {0, 0, DLG1_W, 8};
+        FillRect(hdc, &hdr, g_brBtnPri);
+
+        /* Card area */
+        RECT card = {20, 20, DLG1_W - 20, DLG1_H - 20};
+        fill_rounded(hdc, card, 10, COL_CARD);
+
+        /* Title — @xit1299 */
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COL_ACCENT);
+        SelectObject(hdc, g_fntTitle);
+        RECT trTitle = {30, 30, DLG1_W - 30, 60};
+        DrawTextA(hdc, "@xit1299", -1, &trTitle, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+        /* Separator */
+        HPEN pen = CreatePen(PS_SOLID, 1, COL_BORDER);
+        HPEN op  = (HPEN)SelectObject(hdc, pen);
+        MoveToEx(hdc, 30, 65, NULL);
+        LineTo(hdc, DLG1_W - 30, 65);
+        SelectObject(hdc, op);
+        DeleteObject(pen);
+
+        /* Subtitle */
+        SetTextColor(hdc, COL_TEXT);
+        SelectObject(hdc, g_fntBody);
+        RECT trSub = {30, 75, DLG1_W - 30, 110};
+        DrawTextA(hdc, "Enter your @xit1299 key to continue.", -1, &trSub,
+                  DT_LEFT | DT_WORDBREAK);
+
+        /* Input label */
+        SetTextColor(hdc, COL_SUBTEXT);
+        RECT trLbl = {30, 128, 200, 150};
+        DrawTextA(hdc, "LICENSE KEY", -1, &trLbl, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    /* Color the edit box */
+    case WM_CTLCOLOREDIT: {
+        HDC hdc = (HDC)wp;
+        SetBkColor(hdc, COL_INPUT_BG);
+        SetTextColor(hdc, COL_TEXT);
+        return (LRESULT)g_brInput;
+    }
+
+    /* Color static labels */
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wp;
+        HWND hctl = (HWND)lp;
+        SetBkMode(hdc, TRANSPARENT);
+        if (st && hctl == st->hLblErr)
+            SetTextColor(hdc, RGB(255, 80, 80));
+        else
+            SetTextColor(hdc, COL_TEXT);
+        return (LRESULT)g_brBg;
+    }
+
+    /* Owner-draw buttons */
+    case WM_DRAWITEM: {
+        if (!st) return 0;
+        DRAWITEMSTRUCT* di = (DRAWITEMSTRUCT*)lp;
+        HDC hdc = di->hDC;
+        RECT r  = di->rcItem;
+
+        bool is_primary = (di->CtlID == ID_BTN_ACT);
+        COLORREF col_fill = is_primary ? COL_BTN_PRI : COL_BTN_SEC;
+        COLORREF col_text = is_primary ? COL_BG      : COL_TEXT;
+
+        if (di->itemState & ODS_SELECTED) {
+            col_fill = is_primary ? RGB(0, 160, 175) : RGB(50, 50, 65);
+        }
+
+        fill_rounded(hdc, r, 6, col_fill);
+
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, col_text);
+        SelectObject(hdc, g_fntBody);
+        char buf[64]; GetWindowTextA(di->hwndItem, buf, sizeof(buf));
+        DrawTextA(hdc, buf, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return TRUE;
+    }
+
+    case WM_COMMAND: {
+        if (!st) return 0;
+        WORD id = LOWORD(wp);
+        if (id == ID_BTN_ACT) {
+            char buf[64] = {0};
+            GetWindowTextA(st->hEdit, buf, sizeof(buf));
+            /* ignore placeholder */
+            if (buf[0] && strcmp(buf, "Paste license key") != 0) {
+                st->result_key = buf;
+                st->activated  = true;
+                DestroyWindow(hwnd);
+            } else {
+                SetWindowTextA(st->hLblErr, "Please paste your license key first.");
+            }
+        } else if (id == ID_BTN_QUIT) {
+            st->activated = false;
+            DestroyWindow(hwnd);
+        }
+        return 0;
+    }
+
+    case WM_SETCURSOR:
+        SetCursor(LoadCursorA(NULL, IDC_ARROW));
+        return TRUE;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+
+    case WM_ERASEBKGND:
+        return 1; /* prevent flicker */
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static DLG1_STATE show_activate_dialog() {
+    DLG1_STATE st = {};
+    st.activated = false;
+
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXA wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = Dlg1WndProc;
+        wc.hInstance     = GetModuleHandleA(NULL);
+        wc.lpszClassName = "XIT1299_DLG1";
+        wc.hbrBackground = NULL;
+        wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        RegisterClassExA(&wc);
+        registered = true;
+    }
+
+    /* Center on screen */
+    int sx = GetSystemMetrics(SM_CXSCREEN);
+    int sy = GetSystemMetrics(SM_CYSCREEN);
+    int x  = (sx - DLG1_W) / 2;
+    int y  = (sy - DLG1_H) / 2;
+
+    HWND hw = CreateWindowExA(
+        WS_EX_APPWINDOW | WS_EX_TOPMOST,
+        "XIT1299_DLG1", "@xit1299",
+        WS_POPUP | WS_VISIBLE | WS_THICKFRAME,
+        x, y, DLG1_W, DLG1_H,
+        NULL, NULL, GetModuleHandleA(NULL), &st);
+
+    SetForegroundWindow(hw);
+    SetFocus(hw);
+
+    MSG msg;
+    while (GetMessageA(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+    return st;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   DIALOG 2 — Success (Photo 2)
+   ───────────────────────────────────────────────────────────── */
+#define DLG2_W  380
+#define DLG2_H  280
+#define ID_BTN_ENTER  201
+
+struct DLG2_STATE {
+    std::string time_remaining;
+};
+
+static LRESULT CALLBACK Dlg2WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    DLG2_STATE* st = (DLG2_STATE*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+    case WM_CREATE: {
+        init_resources();
+        DLG2_STATE* s = (DLG2_STATE*)((CREATESTRUCTA*)lp)->lpCreateParams;
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR)s);
+
+        HWND hBtn = CreateWindowExA(0, "BUTTON", "Enter App",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT | BS_OWNERDRAW,
+            (DLG2_W - 160) / 2, DLG2_H - 60, 160, 38,
+            hwnd, (HMENU)ID_BTN_ENTER,
+            GetModuleHandleA(NULL), NULL);
+        SendMessageA(hBtn, WM_SETFONT, (WPARAM)g_fntBody, TRUE);
+        return 0;
+    }
+
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc; GetClientRect(hwnd, &rc);
+
+        /* Background */
+        FillRect(hdc, &rc, g_brBg);
+
+        /* Header stripe */
+        RECT hdr = {0, 0, DLG2_W, 8};
+        FillRect(hdc, &hdr, g_brBtnPri);
+
+        /* Card */
+        RECT card = {16, 16, DLG2_W - 16, DLG2_H - 16};
+        fill_rounded(hdc, card, 10, COL_CARD);
+
+        /* Title */
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COL_ACCENT);
+        SelectObject(hdc, g_fntTitle);
+        RECT tTitle = {24, 26, DLG2_W - 24, 54};
+        DrawTextA(hdc, "@xit1299", -1, &tTitle, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+
+        /* Separator */
+        HPEN pen = CreatePen(PS_SOLID, 1, COL_BORDER);
+        HPEN op  = (HPEN)SelectObject(hdc, pen);
+        MoveToEx(hdc, 24, 60, NULL);
+        LineTo(hdc, DLG2_W - 24, 60);
+        SelectObject(hdc, op);
+        DeleteObject(pen);
+
+        SelectObject(hdc, g_fntBody);
+
+        /* Row 1: VIP activated */
+        SetTextColor(hdc, COL_SUCCESS);
+        RECT r1 = {34, 76, DLG2_W - 34, 98};
+        DrawTextA(hdc, "\xE2\x9C\x94  @xit1299 VIP activated", -1, &r1,
+                  DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+        /* Row 2: time remaining */
+        std::string tr_line = "\xE2\x8F\xB3  ";
+        if (st) tr_line += st->time_remaining;
+        SetTextColor(hdc, COL_TEXT);
+        RECT r2 = {34, 108, DLG2_W - 34, 130};
+        DrawTextA(hdc, tr_line.c_str(), -1, &r2,
+                  DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+        /* Row 3: Protected */
+        SetTextColor(hdc, COL_SUBTEXT);
+        RECT r3 = {34, 140, DLG2_W - 34, 162};
+        DrawTextA(hdc, "\xF0\x9F\x94\x92  Protected by @xit1299", -1, &r3,
+                  DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wp;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COL_TEXT);
+        return (LRESULT)g_brBg;
+    }
+
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT* di = (DRAWITEMSTRUCT*)lp;
+        HDC hdc = di->hDC;
+        RECT r  = di->rcItem;
+        COLORREF fill = (di->itemState & ODS_SELECTED)
+            ? RGB(0, 160, 175) : COL_BTN_PRI;
+        fill_rounded(hdc, r, 6, fill);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COL_BG);
+        SelectObject(hdc, g_fntBody);
+        DrawTextA(hdc, "Enter App", -1, &r,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+        if (LOWORD(wp) == ID_BTN_ENTER) DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
 static void show_success_dialog(const std::string& time_remaining) {
-    std::string msg = "@xit1299 VIP activated\n" +
-                      time_remaining + "\n\n" +
-                      "Protected by @xit1299";
-    MessageBoxA(NULL, msg.c_str(), "@xit1299", MB_OK | MB_ICONINFORMATION);
-}
+    DLG2_STATE st;
+    st.time_remaining = time_remaining.empty() ? "Key is active" : time_remaining;
 
-static void show_error_dialog(const std::string& error_msg) {
-    MessageBoxA(NULL, error_msg.c_str(), "@xit1299", MB_OK | MB_ICONERROR);
-}
-
-static bool show_quit_confirm() {
-    int ret = MessageBoxA(NULL,
-        "Enter your @xit1299 key to continue.\n\nPress OK to enter key, Cancel to quit.",
-        "@xit1299", MB_OKCANCEL | MB_ICONQUESTION);
-    return (ret == IDCANCEL);
-}
-
-#else /* Linux/Mac — console fallback */
-
-static std::string show_key_input_dialog() {
-    char buf[256] = {0};
-    printf("\n╔══════════════════════════════════╗\n");
-    printf("║           @xit1299               ║\n");
-    printf("║  Enter your @xit1299 key         ║\n");
-    printf("║  to continue.                    ║\n");
-    printf("╚══════════════════════════════════╝\n");
-    printf("Paste license key: ");
-    fflush(stdout);
-    if (fgets(buf, sizeof(buf), stdin)) {
-        int len = strlen(buf);
-        while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r' || buf[len-1] == ' '))
-            buf[--len] = 0;
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXA wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = Dlg2WndProc;
+        wc.hInstance     = GetModuleHandleA(NULL);
+        wc.lpszClassName = "XIT1299_DLG2";
+        wc.hbrBackground = NULL;
+        wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        RegisterClassExA(&wc);
+        registered = true;
     }
+
+    int sx = GetSystemMetrics(SM_CXSCREEN);
+    int sy = GetSystemMetrics(SM_CYSCREEN);
+    HWND hw = CreateWindowExA(
+        WS_EX_APPWINDOW | WS_EX_TOPMOST,
+        "XIT1299_DLG2", "@xit1299",
+        WS_POPUP | WS_VISIBLE | WS_THICKFRAME,
+        (sx - DLG2_W) / 2, (sy - DLG2_H) / 2,
+        DLG2_W, DLG2_H,
+        NULL, NULL, GetModuleHandleA(NULL), &st);
+
+    SetForegroundWindow(hw);
+    MSG msg;
+    while (GetMessageA(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+}
+
+static void show_error_msg(const std::string& text) {
+    MessageBoxA(NULL, text.c_str(), "@xit1299 — Error",
+                MB_OK | MB_ICONERROR | MB_TOPMOST);
+}
+
+#else /* ────────── Linux / Console fallback ────────── */
+
+static std::string prompt_key() {
+    printf("\n");
+    printf("  ╔══════════════════════════════════════╗\n");
+    printf("  ║            @xit1299                  ║\n");
+    printf("  ║  Enter your @xit1299 key to          ║\n");
+    printf("  ║  continue.                           ║\n");
+    printf("  ╠══════════════════════════════════════╣\n");
+    printf("  ║  Paste license key:                  ║\n");
+    printf("  ╚══════════════════════════════════════╝\n");
+    printf("  > ");
+    fflush(stdout);
+
+    char buf[128] = {0};
+    if (!fgets(buf, sizeof(buf), stdin)) return "";
+    for (char* p = buf; *p; p++) if (*p == '\n' || *p == '\r') { *p = 0; break; }
     return std::string(buf);
 }
 
 static void show_success_dialog(const std::string& time_remaining) {
-    printf("\n╔══════════════════════════════════╗\n");
-    printf("║           @xit1299               ║\n");
-    printf("║  [OK] @xit1299 VIP activated     ║\n");
-    printf("║  [*] %-28s║\n", time_remaining.c_str());
-    printf("║                                  ║\n");
-    printf("║  [=] Protected by @xit1299       ║\n");
-    printf("╚══════════════════════════════════╝\n");
-    printf("\n  Enter App\n\n");
+    std::string tr = time_remaining.empty() ? "Key active" : time_remaining;
+    printf("\n");
+    printf("  ╔══════════════════════════════════════╗\n");
+    printf("  ║            @xit1299                  ║\n");
+    printf("  ╠══════════════════════════════════════╣\n");
+    printf("  ║  [OK] @xit1299 VIP activated         ║\n");
+    printf("  ║  [*]  %-33s║\n", tr.c_str());
+    printf("  ║                                      ║\n");
+    printf("  ║  [=]  Protected by @xit1299          ║\n");
+    printf("  ╠══════════════════════════════════════╣\n");
+    printf("  ║             Enter App >              ║\n");
+    printf("  ╚══════════════════════════════════════╝\n\n");
     fflush(stdout);
 }
 
-static void show_error_dialog(const std::string& error_msg) {
-    fprintf(stderr, "\n[@xit1299] ERROR: %s\n", error_msg.c_str());
+static void show_error_msg(const std::string& text) {
+    fprintf(stderr, "\n  [@xit1299] ERROR: %s\n\n", text.c_str());
 }
 
-static bool show_quit_confirm() {
-    printf("\nPress Enter to enter key, or type 'quit' to exit: ");
-    fflush(stdout);
-    char buf[16] = {0};
-    fgets(buf, sizeof(buf), stdin);
-    return (strncmp(buf, "quit", 4) == 0);
+#endif /* platform */
+
+/* ═══════════════════════════════════════════════════════════════
+   Public API implementations
+   ═══════════════════════════════════════════════════════════════ */
+
+extern "C" XIT1299_API int XIT1299_CALL
+XIT1299_ValidateSilent(const char* api_base_url,
+                       const char* key,
+                       const char* device_id) {
+    if (!api_base_url || !key) return XIT1299_FAIL;
+    std::string dev = (device_id && device_id[0]) ? device_id : get_device_id();
+    ValidateResult r = call_validate(api_base_url, key, dev);
+    return r.valid ? XIT1299_OK : XIT1299_FAIL;
 }
 
+extern "C" XIT1299_API int XIT1299_CALL
+XIT1299_Activate(const char* api_base_url) {
+    if (!api_base_url) return XIT1299_FAIL;
+
+    std::string base      = api_base_url;
+    std::string device_id = get_device_id();
+
+    const int MAX_ATTEMPTS = 3;
+
+    for (int attempt = 1; attempt <= MAX_ATTEMPTS; ++attempt) {
+
+#ifdef _WIN32
+        DLG1_STATE dlg = show_activate_dialog();
+        if (!dlg.activated) return XIT1299_FAIL; /* user pressed Quit */
+        std::string key = dlg.result_key;
+#else
+        std::string key = prompt_key();
+        if (key.empty()) return XIT1299_FAIL;
 #endif
 
-/* ─────────────────────────────────────────────
-   Core logic
-   ───────────────────────────────────────────── */
+        ValidateResult vr = call_validate(base, key, device_id);
 
-static int validate_key_api(const std::string& api_url, const std::string& key,
-                             const std::string& device_id, std::string& out_msg,
-                             std::string& out_time) {
-    /* Build JSON body */
-    std::string body = "{\"key\":\"" + json_escape(key) + "\","
-                       "\"deviceId\":\"" + json_escape(device_id) + "\"}";
-
-    std::string endpoint = api_url;
-    if (!endpoint.empty() && endpoint.back() == '/') endpoint.pop_back();
-    endpoint += "/keys/validate";
-
-    HttpResponse resp = http_post(endpoint, body);
-
-    if (!resp.success || resp.status_code != 200) {
-        out_msg = "Cannot connect to @xit1299 server. Check your internet connection.";
-        return XIT1299_FAIL;
-    }
-
-    bool valid       = json_get_bool(resp.body, "valid");
-    out_msg          = json_get_string(resp.body, "message");
-    out_time         = json_get_string(resp.body, "timeRemaining");
-
-    return valid ? XIT1299_SUCCESS : XIT1299_FAIL;
-}
-
-/* ─────────────────────────────────────────────
-   Public API
-   ───────────────────────────────────────────── */
-
-extern "C" XIT1299_API int XIT1299_ValidateKey(const char* api_url, const char* key,
-                                                const char* device_id) {
-    if (!api_url || !key) return XIT1299_FAIL;
-
-    std::string dev_id = (device_id && strlen(device_id) > 0)
-                         ? std::string(device_id)
-                         : get_device_id();
-
-    std::string msg, time_remaining;
-    return validate_key_api(std::string(api_url), std::string(key), dev_id, msg, time_remaining);
-}
-
-extern "C" XIT1299_API int XIT1299_Activate(const char* api_url) {
-    if (!api_url) return XIT1299_FAIL;
-
-    std::string device_id = get_device_id();
-    std::string base_url  = std::string(api_url);
-
-    /* Show initial prompt */
-    if (show_quit_confirm()) {
-        /* User chose to quit */
-        return XIT1299_FAIL;
-    }
-
-    /* Retry loop — user gets 3 attempts */
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        std::string key = show_key_input_dialog();
-        if (key.empty()) {
-            /* User cancelled */
-            return XIT1299_FAIL;
+        if (vr.valid) {
+            show_success_dialog(vr.time_remaining);
+            return XIT1299_OK;
         }
 
-        std::string msg, time_remaining;
-        int result = validate_key_api(base_url, key, device_id, msg, time_remaining);
+        std::string err = vr.message;
+        if (err.empty()) err = "License key is not valid.";
 
-        if (result == XIT1299_SUCCESS) {
-            /* Compute display remaining time */
-            std::string display_time = time_remaining.empty() ? "Key active" : time_remaining;
-            show_success_dialog(display_time);
-            return XIT1299_SUCCESS;
+        if (attempt < MAX_ATTEMPTS) {
+            err += "\n\nAttempt " + std::to_string(attempt) + " of " +
+                   std::to_string(MAX_ATTEMPTS) + " — please try again.";
         } else {
-            if (attempt < 2) {
-                show_error_dialog(msg + "\n\nPlease try again.");
-            } else {
-                show_error_dialog(msg + "\n\nNo more attempts. Exiting.");
-            }
+            err += "\n\nNo attempts remaining. The application will now exit.";
         }
+        show_error_msg(err);
     }
 
     return XIT1299_FAIL;

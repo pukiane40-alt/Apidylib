@@ -1,43 +1,48 @@
 /*
- * XIT1299 DLL - Integration Test / Example
+ * test_main.cpp — Example integration + smoke test
  *
- * This shows how to integrate the DLL into your application.
+ * Usage:
+ *   xit1299_test <api_base_url>
  *
- * Build with CMake:
+ * Example:
+ *   xit1299_test https://yourapp.replit.app/api
+ *
+ * Build (CMake):
  *   mkdir build && cd build
- *   cmake ..
- *   cmake --build . --config Release
- *
- * Then run:
+ *   cmake .. -DCMAKE_BUILD_TYPE=Release
+ *   cmake --build .
  *   ./xit1299_test https://yourapp.replit.app/api
  */
 
-#include <stdio.h>
-#include <stdlib.h>
 #include "xit1299.h"
+#include <cstdio>
+#include <cstring>
 
 int main(int argc, char* argv[]) {
-    const char* api_url = (argc > 1) ? argv[1] : "http://localhost:80/api";
+    const char* api = (argc > 1) ? argv[1] : "http://localhost:80/api";
 
-    printf("XIT1299 License Check\n");
-    printf("API: %s\n\n", api_url);
+    printf("=== XIT1299 License Check ===\n");
+    printf("API endpoint : %s\n\n", api);
 
     /*
-     * Call XIT1299_Activate() at your application startup.
-     * It shows the dialog, asks for a key, validates it against the API,
-     * and binds it to this device.
+     * XIT1299_Activate() does everything:
+     *   1. Shows the "@xit1299" activation dialog
+     *   2. Validates the key against the API server
+     *   3. Binds the key to this machine (1 key = 1 device)
+     *   4. Shows the success dialog with time remaining
      *
-     * If it returns XIT1299_FAIL, you must exit.
+     * Returns XIT1299_OK  (0) → key valid, app may continue
+     *         XIT1299_FAIL(1) → key invalid / user quit → exit
      */
-    int result = XIT1299_Activate(api_url);
+    int result = XIT1299_Activate(api);
 
-    if (result == XIT1299_SUCCESS) {
-        printf("License OK — entering application.\n");
-        /* === YOUR APPLICATION STARTS HERE === */
-        /* ... your code ... */
+    if (result == XIT1299_OK) {
+        printf("[XIT1299] License valid — entering application.\n");
+        /* === YOUR APPLICATION CODE STARTS HERE === */
+        /* ... */
         return 0;
-    } else {
-        printf("License check failed. Exiting.\n");
-        return 1;
     }
+
+    printf("[XIT1299] License check failed. Exiting.\n");
+    return 1;
 }
