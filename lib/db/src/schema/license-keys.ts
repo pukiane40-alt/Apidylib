@@ -10,6 +10,7 @@ export const licenseKeysTable = pgTable("license_keys", {
   label: text("label"),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   revoked: boolean("revoked").notNull().default(false),
+  activatedDeviceId: text("activated_device_id"),
   createdBy: integer("created_by").notNull().references(() => usersTable.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

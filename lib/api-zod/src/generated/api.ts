@@ -78,6 +78,7 @@ export const CreateKeyBody = zod.object({
  */
 export const ValidateKeyBody = zod.object({
   key: zod.string(),
+  deviceId: zod.string().nullish(),
 });
 
 export const ValidateKeyResponse = zod.object({
@@ -85,6 +86,7 @@ export const ValidateKeyResponse = zod.object({
   expiresAt: zod.string().nullable(),
   timeRemaining: zod.string().nullable(),
   message: zod.string(),
+  deviceLocked: zod.boolean(),
 });
 
 /**

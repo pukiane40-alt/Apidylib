@@ -63,6 +63,8 @@ export interface LicenseKey {
 
 export interface ValidateKeyRequest {
   key: string;
+  /** @nullable */
+  deviceId?: string | null;
 }
 
 export interface ValidateKeyResponse {
@@ -72,4 +74,5 @@ export interface ValidateKeyResponse {
   /** @nullable */
   timeRemaining: string | null;
   message: string;
+  deviceLocked: boolean;
 }

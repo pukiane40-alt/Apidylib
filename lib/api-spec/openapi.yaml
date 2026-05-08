@@ -347,6 +347,8 @@ components:
       properties:
         key:
           type: string
+        deviceId:
+          type: ["string", "null"]
       required:
         - key
 
@@ -361,8 +363,11 @@ components:
           type: ["string", "null"]
         message:
           type: string
+        deviceLocked:
+          type: boolean
       required:
         - valid
         - expiresAt
         - timeRemaining
         - message
+        - deviceLocked

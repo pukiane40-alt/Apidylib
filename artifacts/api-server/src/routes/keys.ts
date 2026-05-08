@@ -90,6 +90,7 @@ router.post("/", requireAuth, async (req: AuthRequest, res) => {
         label: label ?? null,
         expiresAt,
         revoked: false,
+        activatedDeviceId: null,
         createdBy: req.userId!,
       })
       .returning();
@@ -108,7 +109,7 @@ router.post("/validate", async (req, res) => {
     return;
   }
 
-  const { key } = parsed.data;
+  const { key, deviceId } = parsed.data;
 
   try {
     const [found] = await db
@@ -123,6 +124,7 @@ router.post("/validate", async (req, res) => {
         expiresAt: null,
         timeRemaining: null,
         message: "Key not found",
+        deviceLocked: false,
       });
       return;
     }
@@ -133,6 +135,7 @@ router.post("/validate", async (req, res) => {
         expiresAt: found.expiresAt.toISOString(),
         timeRemaining: null,
         message: "Key has been revoked",
+        deviceLocked: false,
       });
       return;
     }
@@ -143,15 +146,50 @@ router.post("/validate", async (req, res) => {
         expiresAt: found.expiresAt.toISOString(),
         timeRemaining: null,
         message: "Key has expired",
+        deviceLocked: !!found.activatedDeviceId,
       });
       return;
     }
 
+    /* ── Device binding logic ── */
+    if (deviceId) {
+      if (!found.activatedDeviceId) {
+        /* First activation — bind this key to the device */
+        await db
+          .update(licenseKeysTable)
+          .set({ activatedDeviceId: deviceId })
+          .where(eq(licenseKeysTable.id, found.id));
+
+        res.json({
+          valid: true,
+          expiresAt: found.expiresAt.toISOString(),
+          timeRemaining: formatTimeRemaining(found.expiresAt),
+          message: "@xit1299 VIP activated",
+          deviceLocked: true,
+        });
+        return;
+      }
+
+      if (found.activatedDeviceId !== deviceId) {
+        /* Key is already bound to a different device */
+        res.json({
+          valid: false,
+          expiresAt: found.expiresAt.toISOString(),
+          timeRemaining: null,
+          message: "Key is already activated on another device",
+          deviceLocked: true,
+        });
+        return;
+      }
+    }
+
+    /* Device matches (or no deviceId sent) */
     res.json({
       valid: true,
       expiresAt: found.expiresAt.toISOString(),
       timeRemaining: formatTimeRemaining(found.expiresAt),
       message: "@xit1299 VIP activated",
+      deviceLocked: !!found.activatedDeviceId,
     });
   } catch (err) {
     req.log.error({ err }, "Validate key error");
