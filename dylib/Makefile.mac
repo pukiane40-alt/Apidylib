@@ -1,0 +1,40 @@
+# XIT1299 dylib — macOS build
+# Requires: Xcode Command Line Tools (xcode-select --install)
+#
+# Usage:
+#   make -f Makefile.mac          # build
+#   make -f Makefile.mac clean    # clean
+
+CC       = clang
+CFLAGS   = -arch arm64 -arch x86_64 \
+           -mmacosx-version-min=11.0 \
+           -fobjc-arc \
+           -Wall -Wextra -O2
+LDFLAGS  = -dynamiclib \
+           -framework Foundation \
+           -framework AppKit \
+           -framework IOKit \
+           -install_name @rpath/xit1299.dylib
+
+TARGET   = xit1299.dylib
+SRC      = xit1299.m
+
+all: $(TARGET)
+
+$(TARGET): $(SRC) xit1299.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(TARGET) $(SRC)
+	@echo ""
+	@echo "  Built: $(TARGET)"
+	@echo "  Copy xit1299.dylib and xit1299.h into your Xcode project."
+
+test: test_main.m $(TARGET)
+	$(CC) -arch arm64 -arch x86_64 \
+	      -mmacosx-version-min=11.0 \
+	      -fobjc-arc \
+	      -framework Foundation -framework AppKit -framework IOKit \
+	      -o xit1299_test test_main.m -L. -lxit1299 \
+	      -rpath @executable_path
+	@echo "  Run: DYLD_LIBRARY_PATH=. ./xit1299_test <api_url>"
+
+clean:
+	rm -f $(TARGET) xit1299_test *.o
