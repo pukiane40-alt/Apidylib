@@ -1,0 +1,34 @@
+# XIT1299 dylib — iOS jailbreak build (Theos)
+#
+# Requirements:
+#   - Theos installed: https://theos.dev/docs/installation
+#   - iOS SDK
+#
+# Usage:
+#   export THEOS=/opt/theos          # set Theos path
+#   make -f Makefile.theos           # build for device
+#   make -f Makefile.theos package   # create .deb
+#
+# The dylib will auto-load into any app via substrate/ellekit.
+# Add your app's bundle ID to the filter below.
+
+TARGET  := iphone:clang:latest:14.0
+ARCHS   := arm64 arm64e
+
+include $(THEOS)/makefiles/common.mk
+
+LIBRARY_NAME = xit1299
+
+xit1299_FILES          = xit1299.m
+xit1299_CFLAGS         = -fobjc-arc -DTARGET_OS_IPHONE=1
+xit1299_FRAMEWORKS     = Foundation UIKit
+xit1299_PRIVATE_FRAMEWORKS =
+xit1299_LIBRARIES      =
+
+# Filter: inject into specific app (change bundle ID)
+# xit1299_FILTER         = com.yourapp.bundleid
+
+include $(THEOS_MAKE_PATH)/library.mk
+
+after-install::
+	install.exec "killall -9 SpringBoard"
